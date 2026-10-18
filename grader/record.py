@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def new_id(prefix: str) -> str:
@@ -98,6 +98,7 @@ class MessagePart(BaseModel):
     content: str
     template_id: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] = []          # assistant turns that called tools
 
 
 class TokenUsage(BaseModel):
@@ -135,6 +136,7 @@ class LLMCall(Event):                             # L bucket
     usage: TokenUsage = TokenUsage()
     start: float
     end: float
+    finish_reason: str | None = None              # "stop", "tool_calls", "length"
     attempt: int = 1                              # retries
     error: str | None = None
 

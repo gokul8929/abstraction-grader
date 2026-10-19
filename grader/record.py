@@ -60,6 +60,7 @@ class PlanStep(BaseModel):
     step_id: str
     description: str
     assigned_agent: str
+    databases: list[str] = []
     depends_on: list[str] = []
 
 
@@ -89,7 +90,7 @@ class Interpretation(Event):                      # D2 bucket
     llm_call_id: str | None = None
 
 
-MessageOrigin = Literal["system_template", "user_question", "orchestrator", "subagent",
+MessageOrigin = Literal["system_template", "task_context", "user_question", "orchestrator", "subagent",
                         "reflection", "tool_result", "model"]
 
 

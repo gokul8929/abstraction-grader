@@ -52,6 +52,7 @@ class RunStart(Event):
     gpu: str | None = None
     vllm_version: str | None = None
     model_revision: str | None = None
+    chat_template_sha256: str | None = None
     server_flags: list[str] = []
 
 
@@ -272,6 +273,10 @@ def _cmd(args: list[str], cwd: str | None = None) -> str | None:
         return None
 
 
+def _sha_file(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+
 def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAgentBench",
                 model: str = "Qwen/Qwen3.8-27B", vllm_url: str = "http://127.0.0.1:8000") -> dict:
     """Facts for RunStart: node, GPU, commits, vLLM version, exact model revision."""
@@ -289,5 +294,7 @@ def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAg
         "code_commit": _cmd(["git", "rev-parse", "HEAD"], os.path.expanduser(code_dir)),
         "dab_commit": _cmd(["git", "rev-parse", "HEAD"], os.path.expanduser(dab_dir)),
         "model_revision": ref.read_text().strip() if ref.exists() else None,
+        "chat_template_sha256": _sha_file(ref.parent.parent / "snapshots" / ref.read_text().strip()
+                                          / "chat_template.jinja") if ref.exists() else None,
         "vllm_version": vllm_version,
     }

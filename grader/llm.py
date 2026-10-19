@@ -61,6 +61,7 @@ class LLM:
     max_tokens: int = 32768
     effort_via: str = field(default_factory=lambda: os.environ.get("GRADER_EFFORT_VIA", "param"))
     max_attempts: int = 3
+    default_effort: str = "xhigh"              # the template's own default, made explicit
     client: Any = None
 
     def __post_init__(self):
@@ -83,6 +84,7 @@ class LLM:
                    step_id: str | None = None, tools: list[dict] | None = None,
                    effort: str | None = None) -> LLMResult:
         llm_call_id = new_id("llm")
+        effort = effort or self.default_effort
         kwargs: dict[str, Any] = dict(model=self.model, messages=[to_api(m) for m in messages],
                                       temperature=self.temperature, top_p=self.top_p, max_tokens=self.max_tokens,
                                       extra_body={"top_k": self.top_k})

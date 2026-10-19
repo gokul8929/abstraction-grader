@@ -21,7 +21,7 @@ from grader.llm import LLM
 from grader.record import Interpretation, MessagePart, PlanCommitted, PlanStep, RunRecorder, new_id
 
 ORCH_TEMPLATE = "orchestrator_v2"
-WORKER_TEMPLATE = "worker_v1"
+WORKER_TEMPLATE = "worker_v2"
 
 ORCH_SYSTEM = """You are the orchestrator of a data-analysis team. You answer a question over the databases described below, but you never query data yourself.
 
@@ -33,7 +33,7 @@ WORKER_SYSTEM = """You are a worker on a data-analysis team. Do exactly the step
 
 - Look at the tables (list_tables) before you query them.
 - Tool results may be cut short. The full result of any earlier call can be loaded in Python with load('<call_id>').
-- Whenever you make a judgement about the data - which table or column to use, what a column means, how to match or normalise values, where a filter boundary lies - call record_interpretation before acting on it.
+- Whenever you make a judgement about the data - which table or column to use, what a column means, how to match or normalise values, where a filter boundary lies - call record_interpretation before acting on it. Say where it comes from: "data" (cite the call_ids whose results show it), "model_knowledge" (your own background knowledge, not in the data), or "question" (read from the question's wording).
 - When you are done, call finish_step with a short summary: what you found, the key values, and the call_ids that hold the results."""
 
 NUDGE_TOOL = "Call finish_step to report your result, or call a tool to continue."
@@ -66,7 +66,11 @@ FINAL_ANSWER = _fn("final_answer", "Give the final answer to the question.",
 RECORD_INTERP = _fn("record_interpretation", "Record a judgement you are making about the data.",
                     {"kind": {"type": "string", "enum": KINDS},
                      "subject": {"type": "string", "description": "e.g. a table.column"},
-                     "statement": {"type": "string"}}, ["kind", "subject", "statement"])
+                     "statement": {"type": "string"},
+                     "source": {"type": "string", "enum": ["data", "model_knowledge", "question"]},
+                     "evidence": {"type": "array", "items": {"type": "string"},
+                                  "description": "call_ids whose results support this (required when source is data)"}},
+                    ["kind", "subject", "statement", "source"])
 FINISH_STEP = _fn("finish_step", "Finish this step and report back to the orchestrator.",
                   {"summary": {"type": "string"},
                    "result_call_ids": {"type": "array", "items": {"type": "string"}}}, ["summary"])
@@ -241,13 +245,22 @@ class DataAgent:
                     finish = c
                     msgs.append(self._tool_reply(c, "Step finished."))
                 elif c["name"] == "record_interpretation":
-                    try:
-                        self.rec.emit(Interpretation(interp_id=new_id("interp"), agent_id=agent, step_id=step.step_id,
-                                                     llm_call_id=r.llm_call_id, **{k: c["arguments"].get(k) for k in
-                                                                                   ("kind", "subject", "statement")}))
-                        msgs.append(self._tool_reply(c, "Recorded."))
-                    except ValidationError:
-                        msgs.append(self._tool_reply(c, f"ERROR: kind must be one of {KINDS}; subject and statement are required."))
+                    a = c["arguments"]
+                    evidence = [str(x) for x in a.get("evidence") or []]
+                    unknown = [x for x in evidence if not (self.rec.results_dir / f"{x}.json").exists()]
+                    if a.get("source") == "data" and not evidence:
+                        msgs.append(self._tool_reply(c, "ERROR: source is data, so cite the call_ids whose results show it in evidence."))
+                    elif unknown:
+                        msgs.append(self._tool_reply(c, f"ERROR: evidence {unknown} are not call_ids of results in this run."))
+                    else:
+                        try:
+                            self.rec.emit(Interpretation(interp_id=new_id("interp"), agent_id=agent, step_id=step.step_id,
+                                                         llm_call_id=r.llm_call_id, evidence=evidence,
+                                                         **{k: a.get(k) for k in ("kind", "subject", "statement", "source")}))
+                            msgs.append(self._tool_reply(c, "Recorded."))
+                        except ValidationError:
+                            msgs.append(self._tool_reply(c, f"ERROR: kind must be one of {KINDS}; source one of data, "
+                                                            "model_knowledge, question; subject and statement are required."))
                 else:
                     out = await self.hub.call(c["name"], c["arguments"], agent_id=agent, step_id=step.step_id,
                                               llm_call_id=r.llm_call_id)

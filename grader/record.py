@@ -87,6 +87,8 @@ class Interpretation(Event):                      # D2 bucket
     kind: InterpretationKind
     subject: str                                  # e.g. "index_trade.Date"
     statement: str                                # e.g. "dates come in mixed formats; parse all of them"
+    source: Literal["data", "model_knowledge", "question"] | None = None   # where the judgement comes from
+    evidence: list[str] = []                      # call_ids whose results support it (required for "data")
     llm_call_id: str | None = None
 
 

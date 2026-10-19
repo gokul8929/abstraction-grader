@@ -20,14 +20,14 @@ from grader.client import ENGINE_OF, ToolHub
 from grader.llm import LLM
 from grader.record import Interpretation, MessagePart, PlanCommitted, PlanStep, RunRecorder, new_id
 
-ORCH_TEMPLATE = "orchestrator_v1"
+ORCH_TEMPLATE = "orchestrator_v2"
 WORKER_TEMPLATE = "worker_v1"
 
 ORCH_SYSTEM = """You are the orchestrator of a data-analysis team. You answer a question over the databases described below, but you never query data yourself.
 
 First, call commit_plan. Each step is carried out by a separate worker that can query only the databases you list for that step, and can run Python. A worker sees only its own step description plus the summaries of the steps in its depends_on, so write every description so it stands on its own: say what to find or compute, in which database, and exactly what to report back. Keep plans short (1-6 steps). The last step must produce the final answer.
 
-When the workers finish you will see their summaries. Then call final_answer with the answer to the question, or call revise_plan if a step failed or the results do not answer the question."""
+When the workers finish you will see their summaries. Then call final_answer with the answer to the question, or call revise_plan if a step failed or the results do not answer the question. In final_answer, state the answer itself first (the exact value, name or list), then at most a short explanation."""
 
 WORKER_SYSTEM = """You are a worker on a data-analysis team. Do exactly the step you are given, using the tools.
 

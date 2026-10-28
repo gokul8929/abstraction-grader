@@ -34,6 +34,10 @@ def to_api(m: MessagePart) -> dict[str, Any]:
     return d
 
 
+class ContextExhausted(Exception):
+    """The conversation no longer fits in the model's context window."""
+
+
 @dataclass
 class LLMResult:
     llm_call_id: str
@@ -62,6 +66,8 @@ class LLM:
     effort_via: str = field(default_factory=lambda: os.environ.get("GRADER_EFFORT_VIA", "param"))
     max_attempts: int = 3
     default_effort: str = "xhigh"              # the template's own default, made explicit
+    context_margin: int = 256                     # tokens kept free beyond the measured prompt
+    min_output_tokens: int = 1024                 # below this much room, the context counts as exhausted
     client: Any = None
 
     def __post_init__(self):
@@ -79,6 +85,24 @@ class LLM:
             return await asyncio.to_thread(post)
         except Exception:
             return 0
+
+    async def _prompt_size(self, kwargs: dict, effort: str | None) -> tuple[int, int] | None:
+        """(prompt tokens, context limit) from vLLM's /tokenize, rendered exactly like the chat call."""
+        body = {"model": self.model, "messages": kwargs["messages"], "add_generation_prompt": True}
+        if kwargs.get("tools"):
+            body["tools"] = kwargs["tools"]
+        if effort:
+            body["chat_template_kwargs"] = {"reasoning_effort": effort}
+
+        def post() -> tuple[int, int] | None:
+            req = urllib.request.Request(self.base_url.rsplit("/v1", 1)[0] + "/tokenize",
+                                         data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            r = json.loads(urllib.request.urlopen(req, timeout=60).read())
+            return (int(r["count"]), int(r["max_model_len"])) if r.get("max_model_len") else None
+        try:
+            return await asyncio.to_thread(post)
+        except Exception:
+            return None
 
     async def chat(self, messages: list[MessagePart], *, agent_id: str, role: AgentRole, prompt_author: str,
                    step_id: str | None = None, tools: list[dict] | None = None,
@@ -102,11 +126,29 @@ class LLM:
                     top_p=self.top_p, top_k=self.top_k, seed=self.seed, reasoning_effort=effort,
                     max_tokens=self.max_tokens)
 
+        size = await self._prompt_size(kwargs, effort)
+        if size:
+            prompt_tokens, limit = size
+            room = limit - prompt_tokens - self.context_margin
+            if room < self.min_output_tokens:
+                now = time.time()
+                self.rec.emit(LLMCall(start=now, end=now, error=f"context_exhausted: prompt {prompt_tokens} "
+                                      f"tokens, limit {limit}", **meta))
+                raise ContextExhausted(f"prompt {prompt_tokens} tokens leaves {room} of {limit}")
+            if room < kwargs["max_tokens"]:
+                kwargs["max_tokens"] = meta["max_tokens"] = room
+
         for attempt in range(1, self.max_attempts + 1):
             start = time.time()
             try:
                 resp = await self.client.chat.completions.create(**kwargs)
                 break
+            except openai.BadRequestError as e:
+                self.rec.emit(LLMCall(start=start, end=time.time(), attempt=attempt,
+                                      error=f"{type(e).__name__}: {e}", **meta))
+                if "maximum context length" in str(e):
+                    raise ContextExhausted(str(e)) from e
+                raise
             except RETRYABLE as e:
                 self.rec.emit(LLMCall(start=start, end=time.time(), attempt=attempt,
                                       error=f"{type(e).__name__}: {e}", **meta))

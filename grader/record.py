@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def new_id(prefix: str) -> str:
@@ -53,6 +53,7 @@ class RunStart(Event):
     vllm_version: str | None = None
     model_revision: str | None = None
     chat_template_sha256: str | None = None
+    max_model_len: int | None = None             # vLLM context limit for this run
     server_flags: list[str] = []
 
 
@@ -291,6 +292,13 @@ def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAg
         vllm_version = json.loads(urllib.request.urlopen(f"{vllm_url}/version", timeout=3).read()).get("version")
     except Exception:
         pass
+    max_model_len = None
+    try:
+        import urllib.request
+        models = json.loads(urllib.request.urlopen(f"{vllm_url}/v1/models", timeout=3).read())
+        max_model_len = models["data"][0].get("max_model_len")
+    except Exception:
+        pass
     return {
         "node": socket.gethostname(),
         "gpu": _cmd(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]),
@@ -300,4 +308,5 @@ def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAg
         "chat_template_sha256": _sha_file(ref.parent.parent / "snapshots" / ref.read_text().strip()
                                           / "chat_template.jinja") if ref.exists() else None,
         "vllm_version": vllm_version,
+        "max_model_len": max_model_len,
     }

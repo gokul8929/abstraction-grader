@@ -17,7 +17,7 @@ import yaml
 from pydantic import ValidationError
 
 from grader.client import ENGINE_OF, ToolHub
-from grader.llm import LLM
+from grader.llm import LLM, ContextExhausted
 from grader.record import Interpretation, MessagePart, PlanCommitted, PlanStep, RunRecorder, new_id
 
 ORCH_TEMPLATE = "orchestrator_v2"
@@ -167,6 +167,12 @@ class DataAgent:
         return MessagePart(role="tool", origin=origin, tool_call_id=call["id"], content=content)
 
     async def run(self, question: str) -> AgentResult:
+        try:
+            return await self._run(question)
+        except ContextExhausted:                       # the orchestrator's own context is full
+            return AgentResult("", "context_exhausted", 0)
+
+    async def _run(self, question: str) -> AgentResult:
         msgs = [MessagePart(role="system", origin="system_template", template_id=ORCH_TEMPLATE, content=ORCH_SYSTEM),
                 MessagePart(role="user", origin="task_context", content=self.context),
                 MessagePart(role="user", origin="user_question", content=f"Question: {question}")]
@@ -226,8 +232,12 @@ class DataAgent:
 
         nudges, last = 0, ""
         for _ in range(self.max_worker_turns):
-            r = await self.llm.chat(msgs, agent_id=agent, role="subagent", prompt_author="orchestrator",
-                                    step_id=step.step_id, tools=tools, effort=self.effort)
+            try:
+                r = await self.llm.chat(msgs, agent_id=agent, role="subagent", prompt_author="orchestrator",
+                                        step_id=step.step_id, tools=tools, effort=self.effort)
+            except ContextExhausted:
+                return StepResult(step.step_id, f"Stopped: context limit reached. Last message: {last[:1000]}",
+                                  finished=False)
             msgs.append(r.as_message())
             last = r.content or last
             if not r.tool_calls:

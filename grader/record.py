@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 def new_id(prefix: str) -> str:
@@ -43,7 +43,8 @@ class RunStart(Event):
     query_id: str
     question: str
     model: str
-    reasoning_effort: str | None = None
+    model_profile: str | None = None               # grader.models profile key
+    reasoning_effort: str | None = None              # the run's setting: effort level or thinking mode
     reflection: bool = False
     hints: bool = False
     code_commit: str | None = None
@@ -104,6 +105,7 @@ class MessagePart(BaseModel):
     template_id: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] = []          # assistant turns that called tools
+    reasoning: str | None = None                   # reasoning resent to the model on later turns (gpt-oss)
 
 
 class TokenUsage(BaseModel):
@@ -281,6 +283,18 @@ def _sha_file(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def _template_sha(snap: Path) -> str | None:
+    """SHA-256 of the chat template: chat_template.jinja if present, else tokenizer_config.json's chat_template."""
+    if (snap / "chat_template.jinja").exists():
+        return _sha_file(snap / "chat_template.jinja")
+    cfg = snap / "tokenizer_config.json"
+    if cfg.exists():
+        t = json.loads(cfg.read_text()).get("chat_template")
+        if t:
+            return hashlib.sha256(json.dumps(t, sort_keys=True).encode()).hexdigest()
+    return None
+
+
 def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAgentBench",
                 model: str = "Qwen/Qwen3.8-27B", vllm_url: str = "http://127.0.0.1:8000") -> dict:
     """Facts for RunStart: node, GPU, commits, vLLM version, exact model revision."""
@@ -305,8 +319,8 @@ def environment(code_dir: str = "~/abstraction-grader", dab_dir: str = "~/DataAg
         "code_commit": _cmd(["git", "rev-parse", "HEAD"], os.path.expanduser(code_dir)),
         "dab_commit": _cmd(["git", "rev-parse", "HEAD"], os.path.expanduser(dab_dir)),
         "model_revision": ref.read_text().strip() if ref.exists() else None,
-        "chat_template_sha256": _sha_file(ref.parent.parent / "snapshots" / ref.read_text().strip()
-                                          / "chat_template.jinja") if ref.exists() else None,
+        "chat_template_sha256": _template_sha(ref.parent.parent / "snapshots" / ref.read_text().strip())
+                                if ref.exists() else None,
         "vllm_version": vllm_version,
         "max_model_len": max_model_len,
     }

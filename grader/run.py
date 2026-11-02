@@ -1,6 +1,7 @@
 """Run one DAB query through the agent and record everything.
 
   python -m grader.run --dataset stockindex --query 1 --effort medium --seed 0
+  python -m grader.run --model glm-4.5-air --dataset yelp --query 1 --effort nothink
 
 Writes runs/<dataset>/q<query>/<run_id>/ : events.jsonl, server_*.jsonl, results/
 Scores the answer with the query's own validate.py, and writes totals (tokens, time, GPU-seconds, Rs).
@@ -23,7 +24,7 @@ from grader.record import Event, RunEnd, RunRecorder, RunStart, environment, new
 
 DAB = Path(os.environ.get("DAB_DIR", "~/DataAgentBench")).expanduser()
 RUNS = Path(os.environ.get("GRADER_RUNS", Path(__file__).resolve().parent.parent / "runs"))
-GPUS = int(os.environ.get("GRADER_GPUS", "2"))                       # tensor-parallel GPUs held by vLLM
+GPUS_ENV = os.environ.get("GRADER_GPUS")       # override; default = the model profile's tensor-parallel GPUs
 INR_PER_GPU_HOUR = float(os.environ.get("GRADER_INR_PER_GPU_HOUR", "35"))
 FLAGS = ["GRADER_SHOW_CHARS", "GRADER_MAX_ROWS", "GRADER_EXEC_TIMEOUT"]
 
@@ -36,11 +37,11 @@ def load_validator(query_dir: Path):
     return mod.validate
 
 
-def totals(events: list[Event], wall: float) -> dict:
+def totals(events: list[Event], wall: float, gpus: int) -> dict:
     llm = [e for e in events if e.type == "llm_call"]
     tools = [e for e in events if e.type == "tool_call"]
     llm_s = sum(e.end - e.start for e in llm)
-    gpu_s = llm_s * GPUS
+    gpu_s = llm_s * gpus
     u = lambda f: sum(getattr(e.usage, f) for e in llm)
     return {
         "wall_s": round(wall, 2),
@@ -51,12 +52,13 @@ def totals(events: list[Event], wall: float) -> dict:
         "output_tokens": u("output"), "reasoning_tokens": u("reasoning"),
         "plans": sum(1 for e in events if e.type == "plan_committed"),
         "interpretations": sum(1 for e in events if e.type == "interpretation"),
-        "gpu_s": round(gpu_s, 2), "gpus": GPUS, "inr_per_gpu_hour": INR_PER_GPU_HOUR,
+        "gpu_s": round(gpu_s, 2), "gpus": gpus, "inr_per_gpu_hour": INR_PER_GPU_HOUR,
         "agent_inr": round(gpu_s / 3600 * INR_PER_GPU_HOUR, 4),
     }
 
 
-async def run_query(dataset: str, query: str, effort: str | None, seed: int, hints: bool, tag: str) -> Path:
+async def run_query(dataset: str, query: str, effort: str | None, seed: int, hints: bool, tag: str,
+                    model: str | None = None) -> Path:
     ds_dir = DAB / f"query_{dataset}"
     q_dir = ds_dir / f"query{query}"
     question = json.loads((q_dir / "query.json").read_text())
@@ -68,12 +70,13 @@ async def run_query(dataset: str, query: str, effort: str | None, seed: int, hin
     run_id = new_id("run")
     run_dir = RUNS / dataset / f"q{query}" / run_id
     rec = RunRecorder(run_dir, run_id)
-    llm = LLM(rec, seed=seed)
+    llm = LLM(rec, seed=seed, profile_key=model)
+    gpus = int(GPUS_ENV or llm.profile.gpus)
     effort = effort or llm.default_effort
-    env = environment(model=llm.model)
+    env = environment(model=llm.model, vllm_url=llm.base_url.rsplit("/v1", 1)[0])
     rec.emit(RunStart(dataset=dataset, query_id=str(query), question=question, model=llm.model,
-                      reasoning_effort=effort, reflection=False, hints=hints,
-                      server_flags=[f"{k}={os.environ[k]}" for k in FLAGS if k in os.environ] + [f"seed={seed}", f"tag={tag}"],
+                      model_profile=llm.profile.key, reasoning_effort=effort, reflection=False, hints=hints,
+                      server_flags=[f"{k}={os.environ[k]}" for k in FLAGS if k in os.environ] + [f"seed={seed}", f"tag={tag}", f"model={llm.profile.key}"],
                       **env))
     t0, answer, reason = time.time(), "", "error"
     try:
@@ -92,7 +95,7 @@ async def run_query(dataset: str, query: str, effort: str | None, seed: int, hin
         validation = {"is_valid": False, "reason": f"validator error: {type(e).__name__}: {e}"}
 
     from grader.record import load_events
-    rec.emit(RunEnd(answer=answer, end_reason=reason, totals=totals(load_events(run_dir), wall), validation=validation))
+    rec.emit(RunEnd(answer=answer, end_reason=reason, totals=totals(load_events(run_dir), wall, gpus), validation=validation))
     return run_dir
 
 
@@ -100,12 +103,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--query", required=True)
-    ap.add_argument("--effort", choices=["low", "medium", "xhigh"])
+    ap.add_argument("--model", default=None, help="grader.models profile key (default qwen3.8-27b)")
+    ap.add_argument("--effort", help="the profile's setting: effort level, or think / nothink for GLM")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--hints", action="store_true")
     ap.add_argument("--tag", default="dev")
     a = ap.parse_args()
-    run_dir = asyncio.run(run_query(a.dataset, a.query, a.effort, a.seed, a.hints, a.tag))
+    run_dir = asyncio.run(run_query(a.dataset, a.query, a.effort, a.seed, a.hints, a.tag, a.model))
 
     from grader.record import load_events
     end = load_events(run_dir)[-1]

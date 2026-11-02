@@ -17,6 +17,7 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
+from grader import models as model_profiles
 from grader.record import AgentRole, LLMCall, MessagePart, RunRecorder, TokenUsage, new_id
 
 RETRYABLE = (openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError,
@@ -31,6 +32,9 @@ def to_api(m: MessagePart) -> dict[str, Any]:
                            for tc in m.tool_calls]
     if m.role == "tool":
         d["tool_call_id"] = m.tool_call_id
+    if m.reasoning:                                  # only set for profiles with resend_reasoning (gpt-oss)
+        d["reasoning_content"] = m.reasoning
+        d["reasoning"] = m.reasoning
     return d
 
 
@@ -46,31 +50,43 @@ class LLMResult:
     tool_calls: list[dict[str, Any]]   # {"id", "name", "arguments": dict, "parse_error": str | None}
     finish_reason: str | None
     event: LLMCall
+    resend_reasoning: bool = False
 
     def as_message(self) -> MessagePart:
-        """The assistant turn to append to the conversation (reasoning is not resent)."""
+        """The assistant turn to append to the conversation (reasoning resent only if the profile needs it)."""
         return MessagePart(role="assistant", origin="model", content=self.content,
+                           reasoning=self.reasoning if self.resend_reasoning else None,
                            tool_calls=[{k: tc[k] for k in ("id", "name", "arguments")} for tc in self.tool_calls])
 
 
 @dataclass
 class LLM:
     rec: RunRecorder
-    model: str = "Qwen/Qwen3.8-27B"
+    model: str | None = None                       # default: the profile's served model id
     base_url: str = field(default_factory=lambda: os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000/v1"))
-    temperature: float = 0.6
-    top_p: float = 0.95
-    top_k: int = 20
+    temperature: float | None = None               # default: the profile's value, else generation_config.json
+    top_p: float | None = None
+    top_k: int | None = None
     seed: int | None = 0
     max_tokens: int = 32768
     effort_via: str = field(default_factory=lambda: os.environ.get("GRADER_EFFORT_VIA", "param"))
     max_attempts: int = 3
-    default_effort: str = "xhigh"              # the template's own default, made explicit
+    default_effort: str | None = None              # default: the profile's default setting
+    profile_key: str | None = None                 # grader.models profile (env GRADER_MODEL, default qwen3.8-27b)
+    profile: Any = None
     context_margin: int = 256                     # tokens kept free beyond the measured prompt
     min_output_tokens: int = 1024                 # below this much room, the context counts as exhausted
     client: Any = None
 
     def __post_init__(self):
+        self.profile = self.profile or model_profiles.get(self.profile_key)
+        self.model = self.model or self.profile.hf_id
+        self.default_effort = self.default_effort or self.profile.default_setting
+        gen = model_profiles.generation_defaults(self.profile.hf_id)
+        for k in ("temperature", "top_p", "top_k"):
+            if getattr(self, k) is None:
+                v = getattr(self.profile, k)
+                setattr(self, k, v if v is not None else gen.get(k))
         self.client = self.client or AsyncOpenAI(api_key="EMPTY", base_url=self.base_url, timeout=1800)
 
     async def _count_tokens(self, text: str) -> int:
@@ -91,8 +107,11 @@ class LLM:
         body = {"model": self.model, "messages": kwargs["messages"], "add_generation_prompt": True}
         if kwargs.get("tools"):
             body["tools"] = kwargs["tools"]
-        if effort:
-            body["chat_template_kwargs"] = {"reasoning_effort": effort}
+        ctk = dict(kwargs["extra_body"].get("chat_template_kwargs", {}))
+        if kwargs.get("reasoning_effort"):
+            ctk.setdefault("reasoning_effort", kwargs["reasoning_effort"])
+        if ctk:
+            body["chat_template_kwargs"] = ctk
 
         def post() -> tuple[int, int] | None:
             req = urllib.request.Request(self.base_url.rsplit("/v1", 1)[0] + "/tokenize",
@@ -109,18 +128,28 @@ class LLM:
                    effort: str | None = None) -> LLMResult:
         llm_call_id = new_id("llm")
         effort = effort or self.default_effort
+        if effort not in self.profile.settings:
+            raise ValueError(f"setting {effort!r} not valid for {self.profile.key}: {list(self.profile.settings)}")
         kwargs: dict[str, Any] = dict(model=self.model, messages=[to_api(m) for m in messages],
-                                      temperature=self.temperature, top_p=self.top_p, max_tokens=self.max_tokens,
-                                      extra_body={"top_k": self.top_k})
+                                      max_tokens=self.max_tokens, extra_body={})
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            kwargs["extra_body"]["top_k"] = self.top_k
         if self.seed is not None:
             kwargs["seed"] = self.seed
         if tools:
             kwargs["tools"] = tools
-        if effort:
+        extras = self.profile.settings[effort]
+        if "reasoning_effort" in extras:
             if self.effort_via == "template":
-                kwargs["extra_body"]["chat_template_kwargs"] = {"reasoning_effort": effort}
+                kwargs["extra_body"]["chat_template_kwargs"] = {"reasoning_effort": extras["reasoning_effort"]}
             else:
-                kwargs["reasoning_effort"] = effort
+                kwargs["reasoning_effort"] = extras["reasoning_effort"]
+        if "chat_template_kwargs" in extras:
+            kwargs["extra_body"].setdefault("chat_template_kwargs", {}).update(extras["chat_template_kwargs"])
         meta = dict(llm_call_id=llm_call_id, agent_id=agent_id, role=role, prompt_author=prompt_author,
                     step_id=step_id, messages=messages, model=self.model, temperature=self.temperature,
                     top_p=self.top_p, top_k=self.top_k, seed=self.seed, reasoning_effort=effort,
@@ -182,4 +211,5 @@ class LLM:
         ev = self.rec.emit(LLMCall(reasoning=reasoning, content=msg.content, tool_calls=calls, usage=usage,
                                    finish_reason=choice.finish_reason, start=start, end=end, attempt=attempt,
                                    **meta))
-        return LLMResult(llm_call_id, msg.content or "", reasoning, calls, choice.finish_reason, ev)
+        return LLMResult(llm_call_id, msg.content or "", reasoning, calls, choice.finish_reason, ev,
+                         resend_reasoning=self.profile.resend_reasoning)

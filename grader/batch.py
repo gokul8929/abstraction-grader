@@ -22,6 +22,7 @@ import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
+from grader import models as model_profiles
 from grader.record import load_events
 from grader.run import DAB, RUNS
 
@@ -31,7 +32,7 @@ def queries(dataset: str) -> list[str]:
                    if p.is_dir() and (m := re.fullmatch(r"query(\d+)", p.name))), key=int)
 
 
-def finished(tag: str, include_errors: bool = False) -> dict[tuple, dict]:
+def finished(tag: str, include_errors: bool = False, model: str | None = None) -> dict[tuple, dict]:
     """(dataset, query, effort, seed) -> summary, for runs of this tag that reached run_end.
     Runs that ended in a harness error (e.g. vLLM down) are left out unless include_errors, so a resume redoes them."""
     done = {}
@@ -45,6 +46,8 @@ def finished(tag: str, include_errors: bool = False) -> dict[tuple, dict]:
             continue
         flags = dict(f.split("=", 1) for f in start.server_flags if "=" in f)
         if flags.get("tag") != tag or (end.end_reason.startswith("error") and not include_errors):
+            continue
+        if model and flags.get("model", "qwen3.8-27b") != model:
             continue
         key = (start.dataset, start.query_id, start.reasoning_effort, int(flags.get("seed", 0)))
         cand = {"run": ev_file.parent.name, "valid": end.validation["is_valid"], "end": end.end_reason,
@@ -63,22 +66,23 @@ def vllm_up(url: str = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000/v1
         return False
 
 
-def grid(datasets, efforts, seeds, tag):
-    cells = [(d, q, e, s) for d in datasets for q in queries(d) for e in efforts for s in seeds]
+def grid(datasets, efforts, seeds, tag, only=None):
+    cells = [(d, q, e, s) for d in datasets for q in queries(d) for e in efforts for s in seeds
+             if not only or f"{d}:{q}" in only]
     random.Random(tag).shuffle(cells)
     return cells
 
 
 def run_batch(a) -> None:
-    cells = grid(a.datasets, a.efforts, a.seeds, a.tag)
-    done = finished(a.tag)
+    cells = grid(a.datasets, a.efforts, a.seeds, a.tag, a.queries)
+    done = finished(a.tag, model=a.model)
     todo = [c for c in cells if c not in done]
     print(f"[batch {a.tag}] {len(cells)} cells, {len(cells) - len(todo)} already done, {len(todo)} to run", flush=True)
     log_dir = RUNS / "_batch"
     log_dir.mkdir(parents=True, exist_ok=True)
     log = open(log_dir / f"{a.tag}.log", "a")
     for i, (d, q, e, s) in enumerate(todo, 1):
-        cmd = [sys.executable, "-m", "grader.run", "--dataset", d, "--query", q, "--effort", e,
+        cmd = [sys.executable, "-m", "grader.run", "--model", a.model, "--dataset", d, "--query", q, "--effort", e,
                "--seed", str(s), "--tag", a.tag] + (["--hints"] if a.hints else [])
         if a.dry_run:
             print("  would run:", " ".join(cmd[2:]))
@@ -95,13 +99,13 @@ def run_batch(a) -> None:
             status = f"exit {p.returncode}"
         except subprocess.TimeoutExpired:
             status = f"TIMEOUT after {a.timeout}s"
-        r = finished(a.tag).get((d, q, e, s))
+        r = finished(a.tag, model=a.model).get((d, q, e, s))
         print(f"{status}, {time.time() - t:.0f}s, valid={r['valid'] if r else 'no run_end'}", flush=True)
     log.close()
 
 
 def summary(a) -> None:
-    done = finished(a.tag, include_errors=True)
+    done = finished(a.tag, include_errors=True, model=a.model)
     if not done:
         print(f"no finished runs for tag {a.tag}"); return
     print(f"{'dataset':11s} {'q':>2s} {'effort':6s} {'seed':>4s} {'valid':5s} {'wall_s':>7s} {'Rs':>6s} "
@@ -114,7 +118,7 @@ def summary(a) -> None:
     for (d, q, e, s), r in done.items():
         by[e].append(r); by["ALL"].append(r)
     print(f"\n{'effort':6s} {'runs':>4s} {'correct':>8s} {'mean_s':>7s} {'mean_Rs':>8s} {'mean_think':>10s} {'total_Rs':>9s}")
-    for e in ["low", "medium", "xhigh", "ALL"]:
+    for e in sorted({k[2] for k in done}) + ["ALL"]:
         rs = by.get(e)
         if not rs:
             continue
@@ -133,7 +137,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True)
     ap.add_argument("--datasets", default="stockindex,bookreview,yelp", type=lambda s: s.split(","))
-    ap.add_argument("--efforts", default="low,medium,xhigh", type=lambda s: s.split(","))
+    ap.add_argument("--model", default="qwen3.8-27b", help="grader.models profile key")
+    ap.add_argument("--efforts", default=None, type=lambda s: s.split(","), help="default: all of the profile's settings")
+    ap.add_argument("--queries", default=None, type=lambda s: s.split(","), help="dataset:query list, e.g. yelp:1 (smoke tests)")
     ap.add_argument("--seeds", default="0", type=lambda s: [int(x) for x in s.split(",")])
     ap.add_argument("--hints", action="store_true")
     ap.add_argument("--timeout", type=int, default=1800, help="seconds per run")
@@ -141,6 +147,7 @@ def main():
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--json", action="store_true", help="with --summary: also write a JSON file")
     a = ap.parse_args()
+    a.efforts = a.efforts or list(model_profiles.get(a.model).settings)
     summary(a) if a.summary else run_batch(a)
 
 

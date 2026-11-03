@@ -8,8 +8,26 @@ the model call (`coerced` in the llm_call event's tool_calls). Correctly typed a
 """
 from __future__ import annotations
 
+import ast
 import json
 from typing import Any
+
+
+def _parse(text: str, want: type, path: str, notes: list[str], label: str):
+    """JSON first; then a Python literal (single quotes, True/None). Returns the value or None."""
+    try:
+        v = json.loads(text)
+        how = "JSON string"
+    except json.JSONDecodeError:
+        try:
+            v = ast.literal_eval(text.strip())
+            how = "Python-literal string"
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return None
+    if isinstance(v, want):
+        notes.append(f"{path}: {how} -> {label}")
+        return v
+    return None
 
 
 def _coerce(v: Any, schema: dict | None, path: str, notes: list[str]) -> Any:
@@ -18,25 +36,19 @@ def _coerce(v: Any, schema: dict | None, path: str, notes: list[str]) -> Any:
     t = schema.get("type")
     if t == "array":
         if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except json.JSONDecodeError:
+            parsed = _parse(v, list, path, notes, "array")
+            if parsed is None:
                 return v
-            if isinstance(parsed, list):
-                notes.append(f"{path}: JSON string -> array")
-                v = parsed
+            v = parsed
         if isinstance(v, list) and isinstance(schema.get("items"), dict):
             v = [_coerce(x, schema["items"], f"{path}[{i}]", notes) for i, x in enumerate(v)]
         return v
     if t == "object":
         if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except json.JSONDecodeError:
+            parsed = _parse(v, dict, path, notes, "object")
+            if parsed is None:
                 return v
-            if isinstance(parsed, dict):
-                notes.append(f"{path}: JSON string -> object")
-                v = parsed
+            v = parsed
         if isinstance(v, dict) and isinstance(schema.get("properties"), dict):
             v = {k: _coerce(x, schema["properties"].get(k), f"{path}.{k}", notes) for k, x in v.items()}
         return v

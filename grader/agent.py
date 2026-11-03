@@ -88,6 +88,25 @@ def dataset_context(dataset_dir: str | Path, hints: bool = False) -> tuple[str, 
     return f"Databases:\n{listing}\n\nDescription:\n{desc}".strip(), dbs
 
 
+def _text_finish(content: str | None) -> tuple[str, list[str]] | None:
+    """A worker message that is a JSON object with a 'summary' (optionally in a ``` fence) -> (summary, ids)."""
+    t = (content or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`").strip()
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    if not t.startswith("{"):
+        return None
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("summary"), str) or not obj["summary"].strip():
+        return None
+    ids = obj.get("result_call_ids") or []
+    return obj["summary"], [str(x) for x in ids] if isinstance(ids, list) else []
+
+
 @dataclass
 class StepResult:
     step_id: str
@@ -113,6 +132,15 @@ class DataAgent:
 
     # ---------------- orchestrator ----------------
     def _validate(self, steps: list[dict]) -> str | None:
+        shape = ("steps must be a JSON array of objects, each with step_id (string), description (string), "
+                 "databases (array of names) and depends_on (array of step_ids).")
+        if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):
+            return shape
+        for s in steps:
+            if not isinstance(s.get("description"), str) or not s["description"].strip():
+                return "Every step needs a non-empty description. " + shape
+            if not isinstance(s.get("databases", []), list) or not isinstance(s.get("depends_on", []), list):
+                return shape
         ids = [s.get("step_id") for s in steps]
         if not steps:
             return "The plan has no steps."
@@ -183,7 +211,11 @@ class DataAgent:
             for _ in range(self.max_nudges + 1):
                 call, r = await self._orchestrate(msgs, tools, nudge)
                 if call is None:
-                    return AgentResult("", "no_plan" if version == 0 else "no_final_answer", version)
+                    if version == 0:
+                        return AgentResult("", "no_plan", version)
+                    text = next((m.content.strip() for m in reversed(msgs)
+                                 if m.role == "assistant" and (m.content or "").strip()), "")
+                    return AgentResult(text, "answered_text" if text else "no_final_answer", version)
                 if call["name"] == "final_answer":
                     msgs.append(self._tool_reply(call, "Final answer recorded."))
                     return AgentResult(str(call["arguments"].get("answer", "")), "answered", version)
@@ -241,6 +273,11 @@ class DataAgent:
             msgs.append(r.as_message())
             last = r.content or last
             if not r.tool_calls:
+                written = _text_finish(r.content)
+                if written:                                # step result written as JSON text, not via finish_step
+                    msgs.append(MessagePart(role="user", origin="system_template", template_id=WORKER_TEMPLATE,
+                                            content="harness:text_finish (step result taken from your message)"))
+                    return StepResult(step.step_id, written[0], written[1])
                 if nudges >= self.max_nudges and r.finish_reason != "length":
                     return StepResult(step.step_id, last or "(no summary)", finished=False)
                 nudges += 1

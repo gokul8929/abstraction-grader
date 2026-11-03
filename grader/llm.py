@@ -18,6 +18,7 @@ import openai
 from openai import AsyncOpenAI
 
 from grader import models as model_profiles
+from grader.argfix import coerce_args
 from grader.record import AgentRole, LLMCall, MessagePart, RunRecorder, TokenUsage, new_id
 
 RETRYABLE = (openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError,
@@ -54,7 +55,7 @@ class LLMResult:
 
     def as_message(self) -> MessagePart:
         """The assistant turn to append to the conversation (reasoning resent only if the profile needs it)."""
-        return MessagePart(role="assistant", origin="model", content=self.content,
+        return MessagePart(role="assistant", origin="model", content=self.content,  # coerced args are resent
                            reasoning=self.reasoning if self.resend_reasoning else None,
                            tool_calls=[{k: tc[k] for k in ("id", "name", "arguments")} for tc in self.tool_calls])
 
@@ -198,7 +199,11 @@ class LLM:
                     args, err = {}, f"arguments are not a JSON object: {raw[:200]}"
             except json.JSONDecodeError as e:
                 args, err = {}, f"invalid JSON arguments ({e}): {raw[:200]}"
-            calls.append({"id": tc.id, "name": tc.function.name, "arguments": args, "parse_error": err})
+            schema = next((t["function"].get("parameters") for t in (tools or [])
+                           if t.get("function", {}).get("name") == tc.function.name), None)
+            args, coerced = coerce_args(args, schema)
+            calls.append({"id": tc.id, "name": tc.function.name, "arguments": args, "parse_error": err,
+                          "coerced": coerced})
 
         u = resp.usage
         ptd, ctd = getattr(u, "prompt_tokens_details", None), getattr(u, "completion_tokens_details", None)

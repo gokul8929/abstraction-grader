@@ -2,8 +2,9 @@
 
   python -m grader.smoke_check --tag smoke-gptoss --model gpt-oss-120b
 
-Exit code 0 = fine to continue; 1 = stop (prints why). Correctness is NOT required here, only that the
-model talks to the harness properly: tool calls parse, the run ends with an answer, no harness errors.
+Exit code 0 = fine to continue; 1 = stop (prints why). Neither correctness nor a final answer is required
+(a model that never answers is a legitimate outcome, "no_final_answer"); the check only stops on harness
+problems: a crashed run, failed model calls, or no tool calls at all.
 """
 from __future__ import annotations
 
@@ -27,8 +28,8 @@ def main():
         print(f"{d} q{q} {e:8s} seed {s}: end={r['end']!r} valid={r['valid']} tools={r['tool_calls']} "
               f"(failed {r['tool_errors']}) llm={r['llm_calls']} (errors {r['llm_errors']}) "
               f"reasoning_tokens={r['reasoning_tokens']} wall={r['wall_s']:.0f}s")
-        if r["end"] != "answered":
-            bad.append(f"{d} q{q} {e}: ended {r['end']!r}")
+        if r["end"].startswith("error"):
+            bad.append(f"{d} q{q} {e}: harness error {r['end'][:150]!r}")
         elif r["tool_calls"] == 0:
             bad.append(f"{d} q{q} {e}: answered without a single tool call (tool calling not working?)")
         elif r["llm_errors"] > 0:

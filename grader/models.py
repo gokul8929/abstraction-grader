@@ -27,6 +27,7 @@ class ModelProfile:
     top_p: float | None = None
     top_k: int | None = None
     resend_reasoning: bool = False            # pass the model's reasoning back on later turns (gpt-oss needs this)
+    force_tool_call: tuple[str, ...] = ()     # agent roles whose turns are sent with tool_choice="required"
     notes: str = ""
 
     def serve_command(self) -> str:
@@ -49,10 +50,11 @@ PROFILES: dict[str, ModelProfile] = {p.key: p for p in [
     ModelProfile(
         key="gpt-oss-120b", hf_id="openai/gpt-oss-120b",
         settings={e: {"reasoning_effort": e} for e in ("low", "medium", "high")}, default_setting="medium",
-        gpus=4, temperature=1.0, top_p=1.0, top_k=None, resend_reasoning=True,
+        gpus=4, temperature=1.0, top_p=1.0, top_k=None, resend_reasoning=True, force_tool_call=("orchestrator",),
         serve_args=["--tensor-parallel-size 4", "--tool-call-parser openai"] + COMMON,
         notes="MXFP4 weights (Marlin MoE kernels on A100); temperature/top-p 1.0 per OpenAI's gpt-oss guidance; "
-              "reasoning must be returned to the model between tool-call turns"),
+              "reasoning must be returned to the model between tool-call turns; orchestrator turns use "
+              "tool_choice=required (otherwise it can write final_answer as a harmony channel, which vLLM drops)"),
     ModelProfile(
         key="glm-4.5-air", hf_id="zai-org/GLM-4.5-Air-FP8",
         settings={"think": {"chat_template_kwargs": {"enable_thinking": True}},

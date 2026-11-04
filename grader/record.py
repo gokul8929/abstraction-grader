@@ -137,6 +137,7 @@ class LLMCall(Event):                             # L bucket
     seed: int | None = None
     reasoning_effort: str | None = None
     max_tokens: int | None = None
+    tool_choice: str | None = None                # "required" when the profile forces a tool call (L0)
     reasoning: str | None = None
     content: str | None = None
     tool_calls: list[dict[str, Any]] = []

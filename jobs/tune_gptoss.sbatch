@@ -9,8 +9,9 @@
 #SBATCH -o /home/%u/abstraction-grader/runs/_batch/slurm-%j-tune.out
 # One tuning round for gpt-oss-120b (condition B): the 3 tuning queries x low/medium/high, seed 0 (9 runs).
 # Usage:  sbatch --export=ALL,PROMPTS=gptoss_r1 jobs/tune_gptoss.sbatch
+# A rerun of the same prompts under a changed harness needs a new tag:  --export=ALL,PROMPTS=gptoss_r3,TAG_SUFFIX=-tc
 MODEL_KEY=gpt-oss-120b HF_ID=openai/gpt-oss-120b PORT=8001 SEEDS=0
 PROMPTS=${PROMPTS:?set PROMPTS, e.g. sbatch --export=ALL,PROMPTS=gptoss_r1 jobs/tune_gptoss.sbatch}
-TAG=tune-$PROMPTS QUERIES=stockindex:1,bookreview:1,yelp:1 SKIP_SMOKE=1 HF_EXCLUDE='--exclude original/* --exclude metal/*'
+TAG=tune-$PROMPTS${TAG_SUFFIX:-} QUERIES=stockindex:1,bookreview:1,yelp:1 SKIP_SMOKE=1 HF_EXCLUDE='--exclude original/* --exclude metal/*'
 SERVE_ARGS="--tensor-parallel-size 4 --tool-call-parser openai"
 source ~/abstraction-grader/jobs/_common.sh

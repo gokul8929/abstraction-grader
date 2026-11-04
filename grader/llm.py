@@ -152,6 +152,9 @@ class LLM:
             kwargs["seed"] = self.seed
         if tools:
             kwargs["tools"] = tools
+        tool_choice = "required" if tools and role in self.profile.force_tool_call else None
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
         extras = self.profile.settings[effort]
         if "reasoning_effort" in extras:
             if self.effort_via == "template":
@@ -163,7 +166,7 @@ class LLM:
         meta = dict(llm_call_id=llm_call_id, agent_id=agent_id, role=role, prompt_author=prompt_author,
                     step_id=step_id, messages=messages, model=self.model, temperature=self.temperature,
                     top_p=self.top_p, top_k=self.top_k, seed=self.seed, reasoning_effort=effort,
-                    max_tokens=self.max_tokens)
+                    max_tokens=self.max_tokens, tool_choice=tool_choice)
 
         size = await self._prompt_size(kwargs, effort)
         if size:

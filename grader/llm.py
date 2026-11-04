@@ -43,6 +43,15 @@ class ContextExhausted(Exception):
     """The conversation no longer fits in the model's context window."""
 
 
+class ModelOutputError(Exception):
+    """The model kept producing output the server could not parse (e.g. a malformed tool-call header)."""
+
+
+def _unparseable(e: Exception) -> bool:
+    s = str(e)
+    return "message header" in s or "unexpected tokens" in s or "HarmonyError" in s
+
+
 @dataclass
 class LLMResult:
     llm_call_id: str
@@ -182,8 +191,13 @@ class LLM:
             except RETRYABLE as e:
                 self.rec.emit(LLMCall(start=start, end=time.time(), attempt=attempt,
                                       error=f"{type(e).__name__}: {e}", **meta))
+                bad_output = isinstance(e, openai.InternalServerError) and _unparseable(e)
                 if attempt == self.max_attempts:
+                    if bad_output:
+                        raise ModelOutputError(str(e)[:500]) from e
                     raise
+                if bad_output and self.seed is not None:   # same seed would reproduce the same bad output
+                    kwargs["seed"] = meta["seed"] = self.seed + 1009 * attempt
                 await asyncio.sleep(2 ** attempt)
         end = time.time()
 

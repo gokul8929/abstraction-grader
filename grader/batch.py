@@ -83,7 +83,8 @@ def run_batch(a) -> None:
     log = open(log_dir / f"{a.tag}.log", "a")
     for i, (d, q, e, s) in enumerate(todo, 1):
         cmd = [sys.executable, "-m", "grader.run", "--model", a.model, "--dataset", d, "--query", q, "--effort", e,
-               "--seed", str(s), "--tag", a.tag] + (["--hints"] if a.hints else [])
+               "--seed", str(s), "--tag", a.tag] + (["--hints"] if a.hints else []) \
+              + (["--prompts", a.prompts] if a.prompts else [])
         if a.dry_run:
             print("  would run:", " ".join(cmd[2:]))
             continue
@@ -142,6 +143,7 @@ def main():
     ap.add_argument("--queries", default=None, type=lambda s: s.split(","), help="dataset:query list, e.g. yelp:1 (smoke tests)")
     ap.add_argument("--seeds", default="0", type=lambda s: [int(x) for x in s.split(",")])
     ap.add_argument("--hints", action="store_true")
+    ap.add_argument("--prompts", default=None, help="prompt variant folder under grader/prompts")
     ap.add_argument("--timeout", type=int, default=1800, help="seconds per run")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--summary", action="store_true")

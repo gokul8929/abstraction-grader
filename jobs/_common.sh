@@ -8,7 +8,7 @@ bash ~/node09_setup.sh                                   # databases (Postgres/M
 while pgrep -u $USER -f "hf download" > /dev/null; do echo "waiting for another download..."; sleep 60; done
 
 conda activate ~/envs/vllm
-export VLLM_USE_FLASHINFER_SAMPLER=0 HF_HOME=/tmp/$USER/hf
+export VLLM_USE_FLASHINFER_SAMPLER=0 HF_HOME=/tmp/$USER/hf VLLM_SYSTEM_START_DATE=2026-11-03   # date pinned: harmony prompts include it
 echo "== $(date) weights: $HF_ID"
 hf download "$HF_ID" ${HF_EXCLUDE:-} > /tmp/$USER/download_${MODEL_KEY}.log 2>&1 || { echo "download failed"; tail -20 /tmp/$USER/download_${MODEL_KEY}.log; exit 1; }
 find /tmp/$USER -exec touch -h {} + 2>/dev/null
@@ -25,15 +25,17 @@ echo "vLLM up: $(curl -s 127.0.0.1:$PORT/version)"
 
 conda activate ~/envs/grader
 export VLLM_BASE_URL=http://127.0.0.1:$PORT/v1
-echo "== $(date) smoke test: yelp q1, every setting, seed 0"
-python -m grader.batch --model $MODEL_KEY --tag smoke-$TAG --datasets yelp --queries yelp:1 --seeds 0
-if ! python -m grader.smoke_check --tag smoke-$TAG --model $MODEL_KEY; then
-  echo "== smoke test failed; stopping before the real runs. Last vLLM log lines:"; tail -40 $LOG
-  kill $VLLM_PID; exit 1
+if [ "${SKIP_SMOKE:-0}" != 1 ]; then
+  echo "== $(date) smoke test: yelp q1, every setting, seed 0"
+  python -m grader.batch --model $MODEL_KEY --tag smoke-$TAG --datasets yelp --queries yelp:1 --seeds 0
+  if ! python -m grader.smoke_check --tag smoke-$TAG --model $MODEL_KEY; then
+    echo "== smoke test failed; stopping before the real runs. Last vLLM log lines:"; tail -40 $LOG
+    kill $VLLM_PID; exit 1
+  fi
 fi
 
-echo "== $(date) main batch: 13 queries x all settings x seeds ${SEEDS}"
-python -m grader.batch --model $MODEL_KEY --tag $TAG --seeds $SEEDS
+echo "== $(date) main batch: ${QUERIES:-all 13 queries} x all settings x seeds ${SEEDS}, prompts ${PROMPTS:-base}"
+python -m grader.batch --model $MODEL_KEY --tag $TAG --seeds $SEEDS ${QUERIES:+--queries $QUERIES} ${PROMPTS:+--prompts $PROMPTS}
 python -m grader.batch --model $MODEL_KEY --tag $TAG --summary --json > runs/_batch/${TAG}_summary.txt 2>&1
 cat runs/_batch/${TAG}_summary.txt
 echo "== $(date) done"

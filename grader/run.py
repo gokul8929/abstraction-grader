@@ -58,7 +58,7 @@ def totals(events: list[Event], wall: float, gpus: int) -> dict:
 
 
 async def run_query(dataset: str, query: str, effort: str | None, seed: int, hints: bool, tag: str,
-                    model: str | None = None) -> Path:
+                    model: str | None = None, prompts: str | None = None) -> Path:
     ds_dir = DAB / f"query_{dataset}"
     q_dir = ds_dir / f"query{query}"
     question = json.loads((q_dir / "query.json").read_text())
@@ -76,12 +76,12 @@ async def run_query(dataset: str, query: str, effort: str | None, seed: int, hin
     env = environment(model=llm.model, vllm_url=llm.base_url.rsplit("/v1", 1)[0])
     rec.emit(RunStart(dataset=dataset, query_id=str(query), question=question, model=llm.model,
                       model_profile=llm.profile.key, reasoning_effort=effort, reflection=False, hints=hints,
-                      server_flags=[f"{k}={os.environ[k]}" for k in FLAGS if k in os.environ] + [f"seed={seed}", f"tag={tag}", f"model={llm.profile.key}"],
+                      server_flags=[f"{k}={os.environ[k]}" for k in FLAGS if k in os.environ] + [f"seed={seed}", f"tag={tag}", f"model={llm.profile.key}", f"prompts={prompts or 'base'}"],
                       **env))
     t0, answer, reason = time.time(), "", "error"
     try:
         async with ToolHub(rec, ds_dir) as hub:
-            res = await DataAgent(rec, llm, hub, ds_dir, effort=effort, hints=hints).run(question)
+            res = await DataAgent(rec, llm, hub, ds_dir, effort=effort, hints=hints, prompts=prompts).run(question)
         answer, reason = res.answer, res.end_reason
     except Exception as e:
         reason = f"error: {type(e).__name__}: {e}"
@@ -108,8 +108,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--hints", action="store_true")
     ap.add_argument("--tag", default="dev")
+    ap.add_argument("--prompts", default=None, help="prompt variant folder under grader/prompts (default: base prompts)")
     a = ap.parse_args()
-    run_dir = asyncio.run(run_query(a.dataset, a.query, a.effort, a.seed, a.hints, a.tag, a.model))
+    run_dir = asyncio.run(run_query(a.dataset, a.query, a.effort, a.seed, a.hints, a.tag, a.model, a.prompts))
 
     from grader.record import load_events
     end = load_events(run_dir)[-1]

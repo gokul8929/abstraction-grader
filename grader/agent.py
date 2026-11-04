@@ -18,7 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from grader.client import ENGINE_OF, ToolHub
-from grader.llm import LLM, ContextExhausted
+from grader.llm import LLM, ContextExhausted, ModelOutputError
 from grader.record import Interpretation, MessagePart, PlanCommitted, PlanStep, RunRecorder, new_id
 
 ORCH_TEMPLATE = "orchestrator_v2"
@@ -41,6 +41,28 @@ NUDGE_TOOL = "Call finish_step to report your result, or call a tool to continue
 NUDGE_PLAN = "Call commit_plan now."
 NUDGE_FINAL = "Call final_answer or revise_plan now."
 CUT_OFF = "Your last reply was cut off by the length limit. Continue, and keep your reasoning shorter."
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+
+def prompt_variant(name: str | None) -> tuple[str, str, str, str]:
+    """(orchestrator system text, its template id, worker system text, its template id) for a variant."""
+    import hashlib                                   # local: does not depend on the module's import block
+    if not name:
+        return ORCH_SYSTEM, ORCH_TEMPLATE, WORKER_SYSTEM, WORKER_TEMPLATE
+    d = PROMPTS_DIR / name
+    if not d.is_dir():
+        raise ValueError(f"unknown prompt variant {name!r}: no folder {d}")
+    out = []
+    for base, tid, fname in ((ORCH_SYSTEM, ORCH_TEMPLATE, "orchestrator.md"), (WORKER_SYSTEM, WORKER_TEMPLATE, "worker.md")):
+        f = d / fname
+        add = f.read_text().strip() if f.exists() else ""
+        if add:
+            out += [base + "\n\n" + add, f"{tid}+{name}@{hashlib.sha256(add.encode()).hexdigest()[:8]}"]
+        else:
+            out += [base, tid]
+    return tuple(out)
+
 
 KINDS = ["source_choice", "column_meaning", "metric_definition", "join_key", "normalisation",
          "filter_boundary", "entity_match", "other"]
@@ -125,9 +147,10 @@ class AgentResult:
 
 class DataAgent:
     def __init__(self, rec: RunRecorder, llm: LLM, hub: ToolHub, dataset_dir: str | Path,
-                 effort: str | None = None, hints: bool = False, max_worker_turns: int = 25,
+                 effort: str | None = None, hints: bool = False, max_worker_turns: int = 25, prompts: str | None = None,
                  max_revisions: int = 2, max_nudges: int = 2):
         self.rec, self.llm, self.hub, self.effort = rec, llm, hub, effort
+        self.orch_system, self.orch_tid, self.worker_system, self.worker_tid = prompt_variant(prompts)
         self.context, self.dbs = dataset_context(dataset_dir, hints)
         self.max_worker_turns, self.max_revisions, self.max_nudges = max_worker_turns, max_revisions, max_nudges
 
@@ -187,7 +210,7 @@ class DataAgent:
                 continue
             if call:
                 return call, r
-            msgs.append(MessagePart(role="user", origin="system_template", template_id=ORCH_TEMPLATE,
+            msgs.append(MessagePart(role="user", origin="system_template", template_id=self.orch_tid,
                                     content=CUT_OFF if r.finish_reason == "length" else nudge))
         return None, r
 
@@ -200,9 +223,11 @@ class DataAgent:
             return await self._run(question)
         except ContextExhausted:                       # the orchestrator's own context is full
             return AgentResult("", "context_exhausted", 0)
+        except ModelOutputError:                       # the orchestrator's output could not be parsed
+            return AgentResult("", "model_output_error", 0)
 
     async def _run(self, question: str) -> AgentResult:
-        msgs = [MessagePart(role="system", origin="system_template", template_id=ORCH_TEMPLATE, content=ORCH_SYSTEM),
+        msgs = [MessagePart(role="system", origin="system_template", template_id=self.orch_tid, content=self.orch_system),
                 MessagePart(role="user", origin="task_context", content=self.context),
                 MessagePart(role="user", origin="user_question", content=f"Question: {question}")]
         tools, nudge, plan_id, version, reason = [COMMIT_PLAN], NUDGE_PLAN, None, 0, None
@@ -255,7 +280,7 @@ class DataAgent:
         agent = step.assigned_agent
         engines = sorted({self.dbs[d] for d in step.databases}) + ["python"]
         tools = self.hub.openai_tools(engines) + [RECORD_INTERP, FINISH_STEP]
-        msgs = [MessagePart(role="system", origin="system_template", template_id=WORKER_TEMPLATE, content=WORKER_SYSTEM),
+        msgs = [MessagePart(role="system", origin="system_template", template_id=self.worker_tid, content=self.worker_system),
                 MessagePart(role="user", origin="orchestrator",
                             content=f"Your step ({step.step_id}): {step.description}\n"
                                     f"Databases you may use: {', '.join(step.databases) or 'none'}")]
@@ -271,18 +296,21 @@ class DataAgent:
             except ContextExhausted:
                 return StepResult(step.step_id, f"Stopped: context limit reached. Last message: {last[:1000]}",
                                   finished=False)
+            except ModelOutputError:
+                return StepResult(step.step_id, f"Stopped: model output could not be parsed by the server. "
+                                                f"Last message: {last[:1000]}", finished=False)
             msgs.append(r.as_message())
             last = r.content or last
             if not r.tool_calls:
                 written = _text_finish(r.content)
                 if written:                                # step result written as JSON text, not via finish_step
-                    msgs.append(MessagePart(role="user", origin="system_template", template_id=WORKER_TEMPLATE,
+                    msgs.append(MessagePart(role="user", origin="system_template", template_id=self.worker_tid,
                                             content="harness:text_finish (step result taken from your message)"))
                     return StepResult(step.step_id, written[0], written[1])
                 if nudges >= self.max_nudges and r.finish_reason != "length":
                     return StepResult(step.step_id, last or "(no summary)", finished=False)
                 nudges += 1
-                msgs.append(MessagePart(role="user", origin="system_template", template_id=WORKER_TEMPLATE,
+                msgs.append(MessagePart(role="user", origin="system_template", template_id=self.worker_tid,
                                         content=CUT_OFF if r.finish_reason == "length" else NUDGE_TOOL))
                 continue
             finish = None

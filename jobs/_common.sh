@@ -25,6 +25,9 @@ echo "vLLM up: $(curl -s 127.0.0.1:$PORT/version)"
 
 conda activate ~/envs/grader
 export VLLM_BASE_URL=http://127.0.0.1:$PORT/v1
+if [ -n "${RUN_CMD:-}" ]; then                            # one-off command against the server instead of a batch
+  echo "== $(date) $RUN_CMD"; eval "$RUN_CMD"; echo "== $(date) done"; kill $VLLM_PID; exit 0
+fi
 if [ "${SKIP_SMOKE:-0}" != 1 ]; then
   echo "== $(date) smoke test: yelp q1, every setting, seed 0"
   python -m grader.batch --model $MODEL_KEY --tag smoke-$TAG --datasets yelp --queries yelp:1 --seeds 0

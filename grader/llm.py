@@ -206,6 +206,11 @@ class LLM:
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
         calls = []
         for tc in msg.tool_calls or []:
+            name, renamed = tc.function.name or "", []
+            if "<|" in name:                           # control token leaked into the name (vLLM openai parser)
+                clean = name.split("<|")[0].strip()
+                renamed.append(f"name: {name!r} -> {clean!r}")
+                name = clean
             raw = tc.function.arguments or "{}"
             try:
                 args, err = json.loads(raw), None
@@ -214,10 +219,10 @@ class LLM:
             except json.JSONDecodeError as e:
                 args, err = {}, f"invalid JSON arguments ({e}): {raw[:200]}"
             schema = next((t["function"].get("parameters") for t in (tools or [])
-                           if t.get("function", {}).get("name") == tc.function.name), None)
+                           if t.get("function", {}).get("name") == name), None)
             args, coerced = coerce_args(args, schema)
-            calls.append({"id": tc.id, "name": tc.function.name, "arguments": args, "parse_error": err,
-                          "coerced": coerced})
+            calls.append({"id": tc.id, "name": name, "arguments": args, "parse_error": err,
+                          "coerced": renamed + coerced})
 
         u = resp.usage
         ptd, ctd = getattr(u, "prompt_tokens_details", None), getattr(u, "completion_tokens_details", None)

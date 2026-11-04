@@ -63,6 +63,15 @@ PROFILES: dict[str, ModelProfile] = {p.key: p for p in [
         serve_args=["--tensor-parallel-size 4", "--tool-call-parser glm45", "--reasoning-parser glm45"] + COMMON,
         notes="FP8 weights (weight-only FP8 on A100); sampling from the model's generation_config.json; "
               "nothink = no reasoning text, so nothing exists at L3"),
+    ModelProfile(
+        key="muse-glimmer-30b", hf_id="meta-models/Muse-Glimmer-30B",
+        settings={e: {"chat_template_kwargs": {"reasoning_strength": e}} for e in ("low", "medium", "xhigh")},
+        default_setting="xhigh",
+        gpus=2, temperature=1.0, top_p=0.95, top_k=64,
+        serve_args=["--tensor-parallel-size 2", "--language-model-only", "--generation-config auto",
+                    "--tool-call-parser muse_glimmer", "--reasoning-parser muse_glimmer"] + COMMON,
+        notes="BF16 dense; reasoning strength via chat-template kwarg reasoning_strength (reasoning cannot be "
+              "turned off); sampling per the model card; Meta notes outputs are not reproducible even with a seed"),
 ]}
 
 

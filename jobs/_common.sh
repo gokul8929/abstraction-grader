@@ -14,6 +14,8 @@ hf download "$HF_ID" ${HF_EXCLUDE:-} > /tmp/$USER/download_${MODEL_KEY}.log 2>&1
 find /tmp/$USER -exec touch -h {} + 2>/dev/null
 SNAP=$(ls -d $HF_HOME/hub/models--${HF_ID//\//--}/snapshots/*/ | head -1)
 echo "generation_config.json:"; cat "$SNAP/generation_config.json" 2>/dev/null || echo "(none)"
+TPL=$(ls "$SNAP"/chat_template.jinja 2>/dev/null || echo "$SNAP/tokenizer_config.json")
+echo "chat template ($(basename $TPL)) mentions:"; grep -o "reasoning_strength\|reasoning_effort\|reasoning_content\|enable_thinking" "$TPL" 2>/dev/null | sort | uniq -c
 
 echo "== $(date) starting vLLM on port $PORT"
 vllm serve "$HF_ID" $SERVE_ARGS --max-model-len 65536 --gpu-memory-utilization 0.92 \

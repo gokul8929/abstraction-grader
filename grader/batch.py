@@ -100,6 +100,8 @@ def run_batch(a) -> None:
             status = f"exit {p.returncode}"
         except subprocess.TimeoutExpired:
             status = f"TIMEOUT after {a.timeout}s"
+            from grader.timeouts import close_timed_out
+            close_timed_out(a.tag, a.model, a.timeout, older_than=0, key=(d, q, e, s))
         r = finished(a.tag, model=a.model).get((d, q, e, s))
         print(f"{status}, {time.time() - t:.0f}s, valid={r['valid'] if r else 'no run_end'}", flush=True)
     log.close()
